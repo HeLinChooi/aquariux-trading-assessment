@@ -5,6 +5,7 @@ import com.aquariux.technical.assessment.trade.mapper.CryptoPairMapper;
 import com.aquariux.technical.assessment.trade.mapper.CryptoPriceMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
@@ -16,6 +17,7 @@ import java.util.Map;
 @Component
 @Slf4j
 @RequiredArgsConstructor
+@ConditionalOnProperty(name = "scheduler.price-update.enabled", havingValue = "true", matchIfMissing = true)
 public class PriceUpdateScheduler {
 
     private final RestTemplate restTemplate;
@@ -126,10 +128,10 @@ public class PriceUpdateScheduler {
         if (cryptoPairId != null) {
             CryptoPrice cryptoPrice = new CryptoPrice();
             cryptoPrice.setCryptoPairId(cryptoPairId);
-            cryptoPrice.setBidPrice(askPrice);
-            cryptoPrice.setAskPrice(bidPrice);
-            cryptoPrice.setBidSource(askSource);
-            cryptoPrice.setAskSource(bidSource);
+            cryptoPrice.setBidPrice(bidPrice);
+            cryptoPrice.setAskPrice(askPrice);
+            cryptoPrice.setBidSource(bidSource);
+            cryptoPrice.setAskSource(askSource);
             
             cryptoPriceMapper.insertPrice(cryptoPrice);
         } else {
@@ -138,7 +140,6 @@ public class PriceUpdateScheduler {
     }
     
     private Long getCryptoPairId(String pairName) {
-        String swappedPair = "BTCUSDT".equals(pairName) ? "ETHUSDT" : "BTCUSDT";
-        return cryptoPairMapper.findIdByPairName(swappedPair);
+        return cryptoPairMapper.findIdByPairName(pairName);
     }
 }

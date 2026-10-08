@@ -21,3 +21,13 @@ mybatis:
   type-aliases-package: com.aquariux.technical.assessment.trade.entity
   configuration:
     map-underscore-to-camel-case: true
+
+scheduler:
+  price-update:
+    # Set to false to stop calling Binance and Huobi, for example in tests.
+    enabled: true
+
+trade:
+  price:
+    # Trades are rejected when the latest price is older than this.
+    max-age-seconds: 60
