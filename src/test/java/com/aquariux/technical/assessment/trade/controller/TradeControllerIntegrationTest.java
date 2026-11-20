@@ -5,6 +5,7 @@ import com.aquariux.technical.assessment.trade.entity.CryptoPrice;
 import com.aquariux.technical.assessment.trade.mapper.CryptoPriceMapper;
 import com.aquariux.technical.assessment.trade.service.WalletServiceInterface;
 import org.junit.jupiter.api.BeforeEach;
+import com.jayway.jsonpath.JsonPath;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -15,6 +16,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -68,7 +70,7 @@ class TradeControllerIntegrationTest {
         assertThat(balance(1L, "BTC")).isNull();
 
         // When
-        mockMvc.perform(post("/api/trades/execute")
+        mockMvc.perform(post("/api/trades/execute").header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"userId": 1, "pairName": "BTCUSDT", "tradeType": "BUY", "quantity": 0.01}
@@ -88,13 +90,14 @@ class TradeControllerIntegrationTest {
         // Given: user 7 holds 0.5 BTC and 20,000 USDT
 
         // When
-        mockMvc.perform(post("/api/trades/execute")
+        mockMvc.perform(post("/api/trades/execute").header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"userId": 7, "pairName": "BTCUSDT", "tradeType": "SELL", "quantity": 0.6}
                                 """))
                 .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.message").value("Insufficient BTC balance"));
+                .andExpect(jsonPath("$.message").value("Insufficient BTC balance"))
+                .andExpect(jsonPath("$.code").value("INSUFFICIENT_BALANCE"));
 
         // Then
         assertThat(balance(7L, "BTC")).isEqualByComparingTo("0.5");
@@ -102,8 +105,76 @@ class TradeControllerIntegrationTest {
     }
 
     @Test
-    void executeTrade_UnknownUser_ShouldReturnNotFound() throws Exception {
+    void executeTrade_SellCoinNeverHeld_ShouldSayWalletNotFound() throws Exception {
+        // Given: user 1 has no BTC wallet
+        assertThat(balance(1L, "BTC")).isNull();
+
+        // When / Then
+        mockMvc.perform(post("/api/trades/execute").header("Idempotency-Key", UUID.randomUUID().toString())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"userId": 1, "pairName": "BTCUSDT", "tradeType": "SELL", "quantity": 0.01}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.message").value("No BTC wallet"))
+                .andExpect(jsonPath("$.code").value("WALLET_NOT_FOUND"));
+    }
+
+    @Test
+    void executeTrade_RepeatWithSameKey_ShouldTradeOnceAndReturnTheSameTrade() throws Exception {
+        String body = """
+                {"userId": 1, "pairName": "BTCUSDT", "tradeType": "BUY", "quantity": 0.01}
+                """;
+
+        // When: the client retries with the same key
+        String first = mockMvc.perform(post("/api/trades/execute").header("Idempotency-Key", "retry-1")
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+        String second = mockMvc.perform(post("/api/trades/execute").header("Idempotency-Key", "retry-1")
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+
+        // Then: one trade, paid once
+        assertThat(JsonPath.<Integer>read(second, "$.tradeId")).isEqualTo(JsonPath.<Integer>read(first, "$.tradeId"));
+        assertThat(balance(1L, "USDT")).isEqualByComparingTo("9399.90");
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM trades WHERE idempotency_key = 'retry-1'", Integer.class)).isEqualTo(1);
+    }
+
+    @Test
+    void executeTrade_SameKeyForDifferentTrade_ShouldReturn422() throws Exception {
+        mockMvc.perform(post("/api/trades/execute").header("Idempotency-Key", "retry-2")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"userId": 1, "pairName": "BTCUSDT", "tradeType": "BUY", "quantity": 0.01}
+                                """))
+                .andExpect(status().isCreated());
+
+        mockMvc.perform(post("/api/trades/execute").header("Idempotency-Key", "retry-2")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"userId": 1, "pairName": "BTCUSDT", "tradeType": "BUY", "quantity": 0.02}
+                                """))
+                .andExpect(status().isUnprocessableEntity());
+    }
+
+    @Test
+    void executeTrade_WithoutIdempotencyKey_ShouldReturnBadRequest() throws Exception {
         mockMvc.perform(post("/api/trades/execute")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"userId": 1, "pairName": "BTCUSDT", "tradeType": "BUY", "quantity": 0.01}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.message").value("Idempotency-Key header is required"));
+        assertThat(balance(1L, "BTC")).isNull();
+    }
+
+    @Test
+    void executeTrade_UnknownUser_ShouldReturnNotFound() throws Exception {
+        mockMvc.perform(post("/api/trades/execute").header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"userId": 999, "pairName": "BTCUSDT", "tradeType": "BUY", "quantity": 1}
@@ -113,7 +184,7 @@ class TradeControllerIntegrationTest {
 
     @Test
     void executeTrade_MissingFields_ShouldReturnBadRequest() throws Exception {
-        mockMvc.perform(post("/api/trades/execute")
+        mockMvc.perform(post("/api/trades/execute").header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{}"))
                 .andExpect(status().isBadRequest())
@@ -126,7 +197,7 @@ class TradeControllerIntegrationTest {
         jdbcTemplate.update("UPDATE symbols SET active = FALSE WHERE symbol = 'BTC'");
 
         // When / Then
-        mockMvc.perform(post("/api/trades/execute")
+        mockMvc.perform(post("/api/trades/execute").header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"userId": 1, "pairName": "BTCUSDT", "tradeType": "BUY", "quantity": 0.01}

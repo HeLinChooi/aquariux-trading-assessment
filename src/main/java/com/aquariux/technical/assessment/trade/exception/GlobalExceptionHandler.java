@@ -6,6 +6,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingRequestHeaderException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
@@ -25,7 +26,12 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(InvalidTradeException.class)
     public ResponseEntity<ErrorResponse> handleInvalidTrade(InvalidTradeException ex) {
-        return build(HttpStatus.BAD_REQUEST, ex.getMessage());
+        return build(HttpStatus.BAD_REQUEST, ex.getMessage(), ex.getCode());
+    }
+
+    @ExceptionHandler(IdempotencyKeyReusedException.class)
+    public ResponseEntity<ErrorResponse> handleKeyReused(IdempotencyKeyReusedException ex) {
+        return build(HttpStatus.UNPROCESSABLE_ENTITY, ex.getMessage());
     }
 
     @ExceptionHandler(PriceUnavailableException.class)
@@ -48,6 +54,11 @@ public class GlobalExceptionHandler {
         return build(HttpStatus.BAD_REQUEST, "Malformed request body or unsupported field value");
     }
 
+    @ExceptionHandler(MissingRequestHeaderException.class)
+    public ResponseEntity<ErrorResponse> handleMissingHeader(MissingRequestHeaderException ex) {
+        return build(HttpStatus.BAD_REQUEST, ex.getHeaderName() + " header is required");
+    }
+
     @ExceptionHandler(MethodArgumentTypeMismatchException.class)
     public ResponseEntity<ErrorResponse> handleTypeMismatch(MethodArgumentTypeMismatchException ex) {
         return build(HttpStatus.BAD_REQUEST, "Invalid value for " + ex.getName());
@@ -66,7 +77,11 @@ public class GlobalExceptionHandler {
     }
 
     private ResponseEntity<ErrorResponse> build(HttpStatus status, String message) {
-        ErrorResponse body = new ErrorResponse(LocalDateTime.now(), status.value(), status.getReasonPhrase(), message);
+        return build(status, message, null);
+    }
+
+    private ResponseEntity<ErrorResponse> build(HttpStatus status, String message, String code) {
+        ErrorResponse body = new ErrorResponse(LocalDateTime.now(), status.value(), status.getReasonPhrase(), message, code);
         return ResponseEntity.status(status).body(body);
     }
 }

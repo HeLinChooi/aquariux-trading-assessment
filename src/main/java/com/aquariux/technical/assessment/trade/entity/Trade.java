@@ -14,4 +14,6 @@ public class Trade {
     private BigDecimal price;
     private BigDecimal totalAmount;
     private LocalDateTime tradeTime;
+    /** The client's Idempotency-Key. Null only on trades made before the key existed. */
+    private String idempotencyKey;
 }

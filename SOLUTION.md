@@ -13,13 +13,16 @@ scheduler that the trades depend on. The API specification is in
 
 The API can be tried in Swagger UI at
 <http://localhost:8080/swagger-ui/index.html>. The first prices arrive about
-10 seconds after start-up. Some example requests:
+10 seconds after start-up. Every trade request needs an `Idempotency-Key`
+header, for example a new UUID; send the same key only to retry. Some example
+requests:
 
 | Scenario | Request body | Result |
 |---|---|---|
 | First purchase of a coin | `{"userId": 1, "pairName": "BTCUSDT", "tradeType": "BUY", "quantity": 0.01}` | `201`. User 1 had only USDT; a BTC wallet is created |
 | Sell | `{"userId": 7, "pairName": "BTCUSDT", "tradeType": "SELL", "quantity": 0.1}` | `201`. User 7's BTC balance changes from 0.5 to 0.4 |
-| Not enough to sell | `{"userId": 3, "pairName": "BTCUSDT", "tradeType": "SELL", "quantity": 0.1}` | `400` Insufficient BTC balance |
+| Not enough to sell | `{"userId": 7, "pairName": "BTCUSDT", "tradeType": "SELL", "quantity": 0.6}` | `400` Insufficient BTC balance, `code` `INSUFFICIENT_BALANCE`. User 7 holds 0.5 BTC |
+| Selling a coin never held | `{"userId": 3, "pairName": "BTCUSDT", "tradeType": "SELL", "quantity": 0.1}` | `400` No BTC wallet, `code` `WALLET_NOT_FOUND` |
 | Unknown user | `{"userId": 999, "pairName": "BTCUSDT", "tradeType": "BUY", "quantity": 1}` | `404` |
 | Unsupported pair | `{"userId": 1, "pairName": "DOGEUSDT", "tradeType": "BUY", "quantity": 1}` | `400` |
 
@@ -52,8 +55,10 @@ You may check the balances afterwards with `GET /api/wallets/user/{userId}`.
   `UPDATE ... SET balance = balance - ? WHERE ... AND balance >= ?`. If no row
   changes, the balance is insufficient. Two trades at the same time cannot both
   spend the same balance, without a separate read and lock.
-- **The user's row is locked first** (`SELECT ... FOR UPDATE`), so one user's
-  trades run one at a time while different users still trade in parallel.
+- **The user's row is locked before the balances change** (`SELECT ... FOR UPDATE`),
+  so one user's trades change balances one at a time while different users still
+  trade in parallel. The pair and price checks run before the lock, so the lock is
+  held only for the balance changes and the trade record.
   Without it, a BUY (which changes USDT, then BTC) and a SELL (BTC, then USDT)
   for the same user could each lock one wallet row and wait for the other: a
   deadlock. In a test of 300 simultaneous mixed trades on one user without any
@@ -62,6 +67,16 @@ You may check the balances afterwards with `GET /api/wallets/user/{userId}`.
 - **A wallet row is created on the first acquisition of a coin**, as the
   business rules require. Because the user is locked, no other trade can create
   the same wallet at the same moment.
+- **Every trade carries an `Idempotency-Key`, and a retry with the same key
+  returns the first trade.** Creating a trade is not idempotent, and a client
+  that times out cannot tell whether the trade ran, so it retries with the same
+  key. The key is required: an optional key would protect only clients that
+  remember to send it. The key is looked up before the trade, so a late retry still gets its
+  result after the price has gone stale; and again after the user lock, because
+  a request with the same key may have committed while this one waited. The
+  unique index on `(user_id, idempotency_key)` is the last guard. A key reused
+  for a different trade gets `422`, as draft-ietf-httpapi-idempotency-key-header-08
+  recommends.
 - **BUY executes at the best ask, SELL at the best bid.**
 - **Stale prices are refused.** A trade needs a price younger than
   `trade.price.max-age-seconds` (default 60), and returns `503` otherwise. The
@@ -105,8 +120,7 @@ original code.
 - `README.md` offers a Docker option, but the repository has no `Dockerfile`.
 - In the sample data, users 1, 2 and 3 have bought and sold BTC and ETH but have
   no wallet rows for those coins, although wallet rows are created on first
-  acquisition. A SELL for them is rejected as an insufficient balance, which is
-  the correct result.
+  acquisition. A SELL for them is rejected with `WALLET_NOT_FOUND`.
 - The sample data stores whole seconds, such as `2025-01-15 10:00:00`, while
   new prices and trades store microseconds, such as `2026-10-08 15:51:41.866228`.
   Both are `TIMESTAMP` columns. The new values are stored with full precision,
@@ -119,6 +133,9 @@ original code.
 - `TradeControllerIntegrationTest`: the endpoint against the real H2 database
   and sample data, including the wallet changes.
 - `PriceUpdateSchedulerTest`: best bid and ask stored under the right pair.
+- `IdempotencyConcurrencyTest`: 8 requests with one key at the same moment, each
+  committed: one trade, returned to all 8, paid for once. It fails if the second
+  key lookup is served from MyBatis's session cache.
 
 The scheduler is turned off in tests (`scheduler.price-update.enabled=false`),
 so tests never call the real exchanges.
@@ -142,9 +159,6 @@ far below the 200 ms target, but they do not guarantee it.
 
 ## With more time
 
-- **Idempotency key.** A client that retries after a timeout could execute the
-  same trade twice. A client-supplied key with a unique constraint would make
-  retries safe.
 - **Crossed prices across exchanges.** The best bid on one exchange can be
   higher than the best ask on the other. This was seen repeatedly while
   testing, with the BTCUSDT bid from Binance about 60 USDT above the ask from

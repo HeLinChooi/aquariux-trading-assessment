@@ -35,6 +35,10 @@ public interface UserWalletMapper {
             """)
     int debit(@Param("userId") Long userId, @Param("symbolId") Long symbolId, @Param("amount") BigDecimal amount);
 
+    /** @return the balance, or null if the user has no wallet for this coin */
+    @Select("SELECT balance FROM user_wallets WHERE user_id = #{userId} AND symbol_id = #{symbolId}")
+    BigDecimal findBalance(@Param("userId") Long userId, @Param("symbolId") Long symbolId);
+
     /** @return 1 if credited, 0 if the user has no wallet for this coin yet */
     @Update("""
             UPDATE user_wallets

@@ -6,10 +6,12 @@ import com.aquariux.technical.assessment.trade.dto.response.TradeResponse;
 import com.aquariux.technical.assessment.trade.entity.CryptoPrice;
 import com.aquariux.technical.assessment.trade.entity.Trade;
 import com.aquariux.technical.assessment.trade.enums.TradeType;
+import com.aquariux.technical.assessment.trade.exception.IdempotencyKeyReusedException;
 import com.aquariux.technical.assessment.trade.exception.InsufficientBalanceException;
 import com.aquariux.technical.assessment.trade.exception.InvalidTradeException;
 import com.aquariux.technical.assessment.trade.exception.PriceUnavailableException;
 import com.aquariux.technical.assessment.trade.exception.ResourceNotFoundException;
+import com.aquariux.technical.assessment.trade.exception.WalletNotFoundException;
 import com.aquariux.technical.assessment.trade.mapper.CryptoPairMapper;
 import com.aquariux.technical.assessment.trade.mapper.CryptoPriceMapper;
 import com.aquariux.technical.assessment.trade.mapper.TradeMapper;
@@ -35,6 +37,9 @@ public class TradeServiceImpl implements TradeServiceInterface {
     /** Matches the DECIMAL(20,8) columns. */
     private static final int AMOUNT_SCALE = 8;
 
+    /** Matches trades.idempotency_key VARCHAR(64); a UUID is 36. */
+    private static final int MAX_IDEMPOTENCY_KEY_LENGTH = 64;
+
     private final TradeMapper tradeMapper;
     private final UserMapper userMapper;
     private final CryptoPairMapper cryptoPairMapper;
@@ -51,9 +56,16 @@ public class TradeServiceImpl implements TradeServiceInterface {
      */
     @Override
     @Transactional
-    public TradeResponse executeTrade(TradeRequest tradeRequest) {
+    public TradeResponse executeTrade(TradeRequest tradeRequest, String idempotencyKey) {
         Long userId = tradeRequest.getUserId();
-        lockUser(userId);
+        checkIdempotencyKey(idempotencyKey);
+
+        // A retry returns the first trade, even if the price has since gone stale.
+        TradeResponse earlier = findEarlierTrade(userId, idempotencyKey, tradeRequest);
+        if (earlier != null) {
+            return earlier;
+        }
+
         TradingPairDto pair = findActivePair(tradeRequest.getPairName());
         CryptoPrice latestPrice = findRecentPrice(pair);
 
@@ -66,6 +78,16 @@ public class TradeServiceImpl implements TradeServiceInterface {
 
         BigDecimal quantity = tradeRequest.getQuantity();
         BigDecimal totalAmount = price.multiply(quantity).setScale(AMOUNT_SCALE, RoundingMode.HALF_UP);
+
+        // Lock only now: the checks and the price above need no lock, and the
+        // shorter the lock, the less the same user's other trades wait.
+        lockUser(userId);
+        // Look again under the lock: a request with the same key may have
+        // committed its trade while this one waited for the lock.
+        earlier = findEarlierTrade(userId, idempotencyKey, tradeRequest);
+        if (earlier != null) {
+            return earlier;
+        }
 
         if (isBuy) {
             transfer(userId,
@@ -85,6 +107,7 @@ public class TradeServiceImpl implements TradeServiceInterface {
         trade.setPrice(price);
         trade.setTotalAmount(totalAmount);
         trade.setTradeTime(LocalDateTime.now());
+        trade.setIdempotencyKey(idempotencyKey);
         tradeMapper.insertTrade(trade);
 
         log.info("Trade {} executed: user {} {} {} {} at {} for {} {}",
@@ -103,6 +126,40 @@ public class TradeServiceImpl implements TradeServiceInterface {
         if (userMapper.lockById(userId) == null) {
             throw new ResourceNotFoundException("User " + userId + " not found");
         }
+    }
+
+    /**
+     * Required: creating a trade is not idempotent, so a retry without a key
+     * could trade twice. Missing is also refused here, not only by the controller,
+     * so the rule holds for any caller.
+     */
+    private void checkIdempotencyKey(String idempotencyKey) {
+        if (idempotencyKey == null) {
+            throw new InvalidTradeException("Idempotency-Key is required");
+        }
+        if (idempotencyKey.isBlank() || idempotencyKey.length() > MAX_IDEMPOTENCY_KEY_LENGTH) {
+            throw new InvalidTradeException("Idempotency-Key must be 1 to "
+                    + MAX_IDEMPOTENCY_KEY_LENGTH + " characters");
+        }
+    }
+
+    /**
+     * The trade this user already made with this key, or null. A key reused for a
+     * different pair, side or quantity is refused rather than silently ignored.
+     */
+    private TradeResponse findEarlierTrade(Long userId, String idempotencyKey, TradeRequest request) {
+        TradeResponse earlier = tradeMapper.findByIdempotencyKey(userId, idempotencyKey);
+        if (earlier == null) {
+            return null;
+        }
+        boolean sameTrade = earlier.getPairName().equals(request.getPairName().trim().toUpperCase(Locale.ROOT))
+                && earlier.getTradeType() == request.getTradeType()
+                && earlier.getQuantity().compareTo(request.getQuantity()) == 0;
+        if (!sameTrade) {
+            throw new IdempotencyKeyReusedException(
+                    "Idempotency-Key was already used for a different trade, id " + earlier.getTradeId());
+        }
+        return earlier;
     }
 
     private TradingPairDto findActivePair(String pairName) {
@@ -135,11 +192,20 @@ public class TradeServiceImpl implements TradeServiceInterface {
         credit(userId, creditSymbolId, creditAmount);
     }
 
-    /** Fails if the balance does not cover the amount; the transaction then rolls back. */
+    /**
+     * Fails if the wallet is missing or cannot cover the amount; the transaction
+     * then rolls back. The debit changes no row in both cases, so the wallet is
+     * looked up to tell them apart. The user is locked, so no other trade can
+     * create the wallet between the two statements.
+     */
     private void debit(Long userId, Long symbolId, String symbol, BigDecimal amount) {
-        if (userWalletMapper.debit(userId, symbolId, amount) == 0) {
-            throw new InsufficientBalanceException("Insufficient " + symbol + " balance");
+        if (userWalletMapper.debit(userId, symbolId, amount) == 1) {
+            return;
         }
+        if (userWalletMapper.findBalance(userId, symbolId) == null) {
+            throw new WalletNotFoundException("No " + symbol + " wallet");
+        }
+        throw new InsufficientBalanceException("Insufficient " + symbol + " balance");
     }
 
     /**
