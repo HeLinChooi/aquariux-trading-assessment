@@ -15,7 +15,9 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.transaction.annotation.Transactional;
 
+import javax.sql.DataSource;
 import java.math.BigDecimal;
+import java.sql.Connection;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -43,6 +45,9 @@ class TradeControllerIntegrationTest {
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
+
+    @Autowired
+    private DataSource dataSource;
 
     /** A current BTCUSDT price: bid 60,000, ask 60,010. */
     @BeforeEach
@@ -204,5 +209,26 @@ class TradeControllerIntegrationTest {
                                 """))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.message").value("Unsupported trading pair: BTCUSDT"));
+    }
+
+    @Test
+    void executeTrade_WhileAnotherTransactionHoldsTheUserLock_ShouldReturnConflict() throws Exception {
+        // Given: another transaction holds the lock on user 1 and does not finish.
+        // H2 stops waiting for a lock after about 2 seconds.
+        try (Connection other = dataSource.getConnection()) {
+            other.setAutoCommit(false);
+            other.createStatement().executeQuery("SELECT id FROM users WHERE id = 1 FOR UPDATE");
+
+            // When / Then
+            mockMvc.perform(post("/api/trades/execute").header("Idempotency-Key", UUID.randomUUID().toString())
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("""
+                                    {"userId": 1, "pairName": "BTCUSDT", "tradeType": "BUY", "quantity": 0.01}
+                                    """))
+                    .andExpect(status().isConflict())
+                    .andExpect(jsonPath("$.message").value("Another trade for this user is in progress. Try again"));
+
+            other.rollback();
+        }
     }
 }

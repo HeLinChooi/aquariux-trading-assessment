@@ -59,6 +59,10 @@ You may check the balances afterwards with `GET /api/wallets/user/{userId}`.
   so one user's trades change balances one at a time while different users still
   trade in parallel. The pair and price checks run before the lock, so the lock is
   held only for the balance changes and the trade record.
+  A trade that waits for the lock longer than the database allows (2 seconds
+  on H2) is rolled back and returns `409`, and the client retries with the same
+  `Idempotency-Key`. PostgreSQL waits forever by default, so a PostgreSQL
+  deployment needs `lock_timeout` set for the same behaviour.
   Without it, a BUY (which changes USDT, then BTC) and a SELL (BTC, then USDT)
   for the same user could each lock one wallet row and wait for the other: a
   deadlock. In a test of 300 simultaneous mixed trades on one user without any

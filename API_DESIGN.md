@@ -53,6 +53,7 @@ the user; a key reused for a different pair, side or quantity gets `422`.
 | `400` | The wallet exists, but its balance cannot cover the trade. `code`: `INSUFFICIENT_BALANCE` |
 | `400` | `Idempotency-Key` is missing, blank, or longer than 64 characters |
 | `404` | The user does not exist |
+| `409` | Another trade for the same user held its lock longer than the database waits (2 seconds on H2). Nothing changed; retry with the same `Idempotency-Key` |
 | `422` | The `Idempotency-Key` was already used for a different trade |
 | `503` | No price for the pair, or the latest price is older than the allowed age |
 

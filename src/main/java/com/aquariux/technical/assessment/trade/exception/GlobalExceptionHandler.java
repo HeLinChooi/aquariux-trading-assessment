@@ -2,6 +2,7 @@ package com.aquariux.technical.assessment.trade.exception;
 
 import com.aquariux.technical.assessment.trade.dto.response.ErrorResponse;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -37,6 +38,16 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(PriceUnavailableException.class)
     public ResponseEntity<ErrorResponse> handlePriceUnavailable(PriceUnavailableException ex) {
         return build(HttpStatus.SERVICE_UNAVAILABLE, ex.getMessage());
+    }
+
+    /**
+     * Another trade held the user lock longer than the database waits for it.
+     * The trade was rolled back, so the client can retry with the same Idempotency-Key.
+     */
+    @ExceptionHandler(CannotAcquireLockException.class)
+    public ResponseEntity<ErrorResponse> handleLockTimeout(CannotAcquireLockException ex) {
+        log.warn("Gave up waiting for a lock: {}", ex.getMostSpecificCause().getMessage());
+        return build(HttpStatus.CONFLICT, "Another trade for this user is in progress. Try again");
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
